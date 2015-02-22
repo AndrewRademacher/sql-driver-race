@@ -45,10 +45,8 @@ main = do
             ]
 
 insertHasql :: [Location] -> H.Pool HP.Postgres -> IO ()
-insertHasql locs hconn = do
-        _ <- H.session hconn $
-            H.tx Nothing $ mapM_ (H.unitEx . insLoc) locs
-        H.releasePool hconn
+insertHasql locs hconn =
+        void $ H.session hconn $ H.tx Nothing $ mapM_ (H.unitEx . insLoc) locs
     where insLoc (i, x, y) = [H.stmt|INSERT INTO hasql_location (id, x, y) VALUES ($i, $x, $y)|]
 
 insertSimple :: [Location] -> S.Connection -> IO ()
