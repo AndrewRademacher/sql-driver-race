@@ -3,58 +3,69 @@
 
 module Main where
 
-import           Control.Monad
-import           Criterion
-import           Criterion.Main
-import           Data.ByteString            (ByteString)
-import           Data.UUID
+import Criterion
+import Criterion.Main
+import System.Random
 import qualified Database.PostgreSQL.Simple as S
-import qualified Hasql                      as H
-import qualified Hasql.Postgres             as HP
-import           System.Random
+import qualified Hasql.Session as A
+import qualified Hasql.Query as B
+import qualified Hasql.Encoders as C
+import qualified Hasql.Decoders as D
+import qualified Hasql.Connection as E
 
 type Location = (UUID, Double, Double)
 
 main :: IO ()
 main = do
-        hps   <- maybe (fail "Improper session settings") return $ H.poolSettings 6 30
-        hconn <- H.acquirePool (HP.StringSettings connStr) hps :: IO (H.Pool HP.Postgres)
-        _ <- H.session hconn $
-            H.tx Nothing $
-                H.unitEx [H.stmt| CREATE TABLE IF NOT EXISTS hasql_location (
-                                    id          uuid                NOT NULL,
-                                    x           double precision    NOT NULL,
-                                    y           double precision    NOT NULL
-                                  )
-                                |]
+        Right hconn <- E.acquire connStr
 
         pconn <- S.connectPostgreSQL connStr
-        _     <- S.execute_ pconn "CREATE TABLE IF NOT EXISTS simple_location (id uuid NOT NULL, x double precision NOT NULL, y double precision NOT NULL)"
+        _     <- S.execute_ pconn "DROP TABLE IF EXISTS hasql_location"
+        _     <- S.execute_ pconn "DROP TABLE IF EXISTS simple_location"
+        _     <- S.execute_ pconn "CREATE TABLE hasql_location (id uuid NOT NULL, x double precision NOT NULL, y double precision NOT NULL)"
+        _     <- S.execute_ pconn "CREATE TABLE simple_location (id uuid NOT NULL, x double precision NOT NULL, y double precision NOT NULL)"
 
         defaultMain
             [ env (genData 100) $ \locs ->
                 bgroup "Insert 100"
-                    [ bench "hasql"  $ whnfIO $ insertHasql locs hconn
-                    , bench "simple" $ whnfIO $ insertSimple locs pconn
+                    [ bench "hasql" $ whnfIO $ insertUsingHasql locs hconn
+                    , bench "postgresql-simple" $ whnfIO $ insertUsingPostgresqlSimple locs pconn
                     ]
             , env (genData 1000) $ \locs ->
                 bgroup "Insert 1000"
-                    [ bench "hasql"  $ whnfIO $ insertHasql locs hconn
-                    , bench "simple" $ whnfIO $ insertSimple locs pconn
+                    [ bench "hasql" $ whnfIO $ insertUsingHasql locs hconn
+                    , bench "postgresql-simple" $ whnfIO $ insertUsingPostgresqlSimple locs pconn
                     ]
             ]
 
-insertHasql :: [Location] -> H.Pool HP.Postgres -> IO ()
-insertHasql locs hconn =
-        void $ H.session hconn $ H.tx Nothing $ mapM_ (H.unitEx . insLoc) locs
-    where insLoc (i, x, y) = [H.stmt|INSERT INTO hasql_location (id, x, y) VALUES ($i, $x, $y)|]
+insertUsingHasql :: [Location] -> E.Connection -> IO ()
+insertUsingHasql locations connection =
+  do
+    Right result <- A.run session connection
+    return result
+  where
+    session =
+      A.query locations query
+      where
+        query =
+          B.statement sql encoder decoder True
+          where
+            sql =
+              "insert into hasql_location (id, x, y) select * from unnest ($1, $2, $3)"
+            encoder =
+              contramap unzip3 (contrazip3 (list C.uuid) (list C.float8) (list C.float8))
+              where
+                list value =
+                  C.value (C.array (C.arrayDimension foldl' (C.arrayValue value)))
+            decoder =
+              D.unit
 
-insertSimple :: [Location] -> S.Connection -> IO ()
-insertSimple locs pconn = void (S.executeMany pconn query locs)
+insertUsingPostgresqlSimple :: [Location] -> S.Connection -> IO ()
+insertUsingPostgresqlSimple locs pconn = void (S.executeMany pconn query locs)
     where query = "INSERT INTO simple_location VALUES (?, ?, ?)"
 
 connStr :: ByteString
-connStr = "host=192.168.59.103 port=5432 user=postgres dbname=sql_driver_race"
+connStr = "host=localhost port=5432 user=postgres dbname=sql_driver_race"
 
 genData :: Int -> IO [Location]
 genData i = do
